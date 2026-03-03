@@ -1,0 +1,5 @@
+{
+  "name": "NDA Vocab Master",
+  "description": "A vocabulary flashcard app for NDA aspirants, inspired by Magoosh GRE, featuring spaced repetition and difficulty-based decks.",
+  "requestFramePermissions": []
+}
