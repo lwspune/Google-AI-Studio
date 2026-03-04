@@ -8,9 +8,24 @@
 }
 
 body {
-  @apply bg-[#F8F9FA] text-[#1A1A1A] font-sans;
+  @apply bg-[#F8F9FA] text-[#1A1A1A] font-sans overflow-x-hidden;
+  /* Prevent pull-to-refresh on mobile if desired, or just handle safe areas */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Disable text selection for interactive elements to feel more like a native app */
+button, .card-shadow {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .card-shadow {
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+}
+
+/* Safe area padding for sticky headers */
+header {
+  padding-top: max(1.5rem, env(safe-area-inset-top)) !important;
 }

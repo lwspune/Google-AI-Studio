@@ -22,7 +22,9 @@ import {
   ListFilter,
   ArrowRight,
   TrendingUp,
-  Clock
+  Clock,
+  Calendar,
+  Zap
 } from 'lucide-react';
 import { 
   PieChart, 
@@ -37,16 +39,11 @@ import {
   Legend 
 } from 'recharts';
 import { VOCAB_DATA, VocabWord } from './data/vocab';
-
-type MasteryStatus = 'learning' | 'reviewing' | 'mastered';
-
-interface UserProgress {
-  [wordId: string]: MasteryStatus;
-}
+import { calculateSRS, isDue, UserProgress, SRSData, MasteryStatus } from './services/srsService';
 
 export default function App() {
-  const [currentDeck, setCurrentDeck] = useState<'common' | 'basic' | 'advanced' | 'daily' | null>(null);
-  const [viewMode, setViewMode] = useState<'study' | 'quiz' | 'daily_quiz'>('study');
+  const [currentDeck, setCurrentDeck] = useState<'common' | 'basic' | 'advanced' | 'daily' | 'review' | null>(null);
+  const [viewMode, setViewMode] = useState<'study' | 'quiz' | 'daily_quiz' | 'srs_review'>('study');
   const [sessionQueue, setSessionQueue] = useState<VocabWord[]>([]);
   const [quizOptions, setQuizOptions] = useState<string[]>([]);
   const [quizAnswered, setQuizAnswered] = useState<string | null>(null);
@@ -78,7 +75,27 @@ export default function App() {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [progress, setProgress] = useState<UserProgress>(() => {
     const saved = localStorage.getItem('nda_vocab_progress');
-    return saved ? JSON.parse(saved) : {};
+    if (!saved) return {};
+    const parsed = JSON.parse(saved);
+    
+    // Migration logic: convert old status strings to SRSData objects
+    const migrated: UserProgress = {};
+    Object.keys(parsed).forEach(id => {
+      const val = parsed[id];
+      if (typeof val === 'string') {
+        migrated[id] = {
+          status: val as MasteryStatus,
+          interval: val === 'mastered' ? 30 : 1,
+          easeFactor: 2.5,
+          repetition: val === 'mastered' ? 3 : 1,
+          lastReview: new Date().toISOString(),
+          nextReview: new Date().toISOString()
+        };
+      } else {
+        migrated[id] = val;
+      }
+    });
+    return migrated;
   });
 
   // Initial Sync from Server
@@ -219,18 +236,23 @@ export default function App() {
       if (currentDeck === 'daily') {
         // Daily Quiz Logic: 15 random words, prioritizing learning/unstarted
         const allWords = [...VOCAB_DATA];
-        const learning = allWords.filter(w => progress[w.id] === 'learning');
+        const learning = allWords.filter(w => progress[w.id]?.status === 'learning');
         const unstarted = allWords.filter(w => !progress[w.id]);
-        const mastered = allWords.filter(w => progress[w.id] === 'mastered');
+        const mastered = allWords.filter(w => progress[w.id]?.status === 'mastered');
         
         // Combine and shuffle
         const pool = [...learning, ...unstarted, ...mastered];
         initialQueue = pool.slice(0, 15).sort(() => Math.random() - 0.5);
         setViewMode('daily_quiz');
+      } else if (currentDeck === 'review') {
+        // SRS Review Logic: Words that are due
+        const dueWords = VOCAB_DATA.filter(w => progress[w.id] && isDue(w.id, progress));
+        initialQueue = [...dueWords].sort(() => Math.random() - 0.5);
+        setViewMode('srs_review');
       } else {
         const deckWords = VOCAB_DATA.filter(w => w.difficulty === currentDeck);
         // For Quiz, we might want all words or just unmastered ones
-        const unmastered = deckWords.filter(w => progress[w.id] !== 'mastered');
+        const unmastered = deckWords.filter(w => progress[w.id]?.status !== 'mastered');
         initialQueue = viewMode === 'quiz' 
           ? [...deckWords].sort(() => Math.random() - 0.5) // Shuffle for quiz
           : (unmastered.length > 0 ? unmastered : deckWords);
@@ -269,13 +291,38 @@ export default function App() {
   const handleMasteryUpdate = (status: MasteryStatus) => {
     if (!currentWord) return;
 
+    // Map old status to SRS quality
+    const quality = status === 'mastered' ? 5 : 2;
+    const newData = calculateSRS(quality, progress[currentWord.id]);
+
     setProgress(prev => ({
       ...prev,
-      [currentWord.id]: status
+      [currentWord.id]: newData
     }));
 
     if (status === 'learning') {
       // SRS Logic: Re-queue the word at the end of the current session
+      setSessionQueue(prev => [...prev, currentWord]);
+    }
+
+    // Auto-advance after small delay
+    setTimeout(() => {
+      handleNext();
+    }, 300);
+  };
+
+  const handleSRSUpdate = (quality: number) => {
+    if (!currentWord) return;
+
+    const newData = calculateSRS(quality, progress[currentWord.id]);
+
+    setProgress(prev => ({
+      ...prev,
+      [currentWord.id]: newData
+    }));
+
+    if (quality < 3) {
+      // If incorrect, re-queue the word at the end of the current session
       setSessionQueue(prev => [...prev, currentWord]);
     }
 
@@ -327,19 +374,20 @@ export default function App() {
 
   const getMasteryCount = (deck: string) => {
     const deckWords = VOCAB_DATA.filter(w => w.difficulty === deck);
-    return deckWords.filter(w => progress[w.id] === 'mastered').length;
+    return deckWords.filter(w => progress[w.id]?.status === 'mastered').length;
   };
 
   const getLearningCount = (deck: string) => {
     const deckWords = VOCAB_DATA.filter(w => w.difficulty === deck);
-    return deckWords.filter(w => progress[w.id] === 'learning').length;
+    return deckWords.filter(w => progress[w.id]?.status === 'learning').length;
   };
 
   const overallStats = useMemo(() => {
-    const mastered = Object.values(progress).filter(s => s === 'mastered').length;
-    const learning = Object.values(progress).filter(s => s === 'learning').length;
+    const mastered = Object.values(progress).filter(s => (s as SRSData).status === 'mastered').length;
+    const learning = Object.values(progress).filter(s => (s as SRSData).status === 'learning' || (s as SRSData).status === 'reviewing').length;
     const total = VOCAB_DATA.length;
-    const unstarted = total - mastered - learning;
+    const unstarted = total - Object.keys(progress).length;
+    const dueCount = VOCAB_DATA.filter(w => progress[w.id] && isDue(w.id, progress)).length;
 
     const pieData = [
       { name: 'Mastered', value: mastered, color: '#10b981' },
@@ -361,7 +409,7 @@ export default function App() {
       return matchesSearch && matchesDifficulty;
     });
 
-    return { mastered, learning, total, unstarted, pieData, barData, filteredVocab };
+    return { mastered, learning, total, unstarted, dueCount, pieData, barData, filteredVocab };
   }, [progress, searchTerm, filterDifficulty]);
 
   if (showAdminDashboard && userEmail === 'connect.lwspune@gmail.com') {
@@ -394,7 +442,7 @@ export default function App() {
               Student Progress Overview
             </h3>
             
-            <div className="overflow-x-auto">
+            <div className="hidden sm:block overflow-x-auto">
               <table className="w-full text-left">
                 <thead>
                   <tr className="border-b border-black/5">
@@ -433,16 +481,56 @@ export default function App() {
                       </tr>
                     );
                   })}
-                  {adminStats.length === 0 && (
-                    <tr>
-                      <td colSpan={5} className="py-12 text-center text-muted-foreground">
-                        No student progress data found.
-                      </td>
-                    </tr>
-                  )}
                 </tbody>
               </table>
             </div>
+
+            <div className="sm:hidden space-y-4">
+              {adminStats.map((stat) => {
+                const total = VOCAB_DATA.length;
+                const percentage = Math.round((stat.mastered / total) * 100);
+                return (
+                  <div key={stat.email} className="p-4 bg-[#F8F9FA] rounded-2xl border border-black/5">
+                    <div className="flex justify-between items-start mb-3">
+                      <div>
+                        <div className="font-bold text-sm">{stat.name}</div>
+                        <div className="text-[10px] text-muted-foreground">{stat.email}</div>
+                        <div className="text-[10px] font-mono text-emerald-600 mt-1">{stat.phone}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[10px] text-muted-foreground uppercase tracking-widest">Mastered</div>
+                        <div className="font-mono text-emerald-600 font-bold">{stat.mastered}</div>
+                      </div>
+                    </div>
+                    <div className="flex justify-between items-center mb-3">
+                      <div className="text-[10px] text-muted-foreground">
+                        Last Active: {new Date(stat.lastActive).toLocaleDateString()}
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[10px] text-muted-foreground uppercase tracking-widest">Learning</div>
+                        <div className="font-mono text-amber-600 font-bold">{stat.learning}</div>
+                      </div>
+                    </div>
+                    <div className="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-emerald-500" 
+                        style={{ width: `${percentage}%` }}
+                      />
+                    </div>
+                    <div className="flex justify-between mt-1">
+                      <span className="text-[9px] font-mono text-emerald-600 uppercase">Progress</span>
+                      <span className="text-[9px] font-mono text-emerald-600">{percentage}%</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {adminStats.length === 0 && (
+              <div className="py-12 text-center text-muted-foreground">
+                No student progress data found.
+              </div>
+            )}
           </div>
         </main>
       </div>
@@ -604,8 +692,15 @@ export default function App() {
                 </div>
                 <p className="text-sm text-muted-foreground mb-3">{word.definition}</p>
                 <div className="mt-auto flex items-center justify-between">
-                  <span className="text-[10px] font-mono text-muted-foreground">({word.partOfSpeech})</span>
-                  {progress[word.id] === 'mastered' && (
+                  <div className="flex flex-col">
+                    <span className="text-[10px] font-mono text-muted-foreground">({word.partOfSpeech})</span>
+                    {progress[word.id] && (
+                      <span className={`text-[9px] font-mono mt-1 ${isDue(word.id, progress) ? 'text-amber-600 font-bold' : 'text-emerald-600'}`}>
+                        {progress[word.id].status.toUpperCase()} • Next: {new Date(progress[word.id].nextReview).toLocaleDateString()}
+                      </span>
+                    )}
+                  </div>
+                  {progress[word.id]?.status === 'mastered' && (
                     <CheckCircle2 size={16} className="text-emerald-500" />
                   )}
                 </div>
@@ -650,7 +745,15 @@ export default function App() {
 
         <main className="flex-1 max-w-5xl mx-auto w-full p-6 space-y-8">
           {/* Overview Cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-6">
+            <div className="bg-white p-6 rounded-3xl card-shadow border-b-4 border-amber-500">
+              <div className="flex items-center gap-3 mb-2">
+                <Zap className="text-amber-500" size={20} />
+                <span className="text-xs font-mono uppercase tracking-widest text-muted-foreground">Due Now</span>
+              </div>
+              <p className="text-4xl font-mono font-bold">{overallStats.dueCount}</p>
+              <p className="text-xs text-muted-foreground mt-1">Words ready for review</p>
+            </div>
             <div className="bg-white p-6 rounded-3xl card-shadow border-b-4 border-emerald-500">
               <div className="flex items-center gap-3 mb-2">
                 <Trophy className="text-emerald-500" size={20} />
@@ -735,15 +838,24 @@ export default function App() {
             </h3>
             {overallStats.learning > 0 ? (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-                {VOCAB_DATA.filter(w => progress[w.id] === 'learning').map(word => (
-                  <div 
-                    key={word.id}
-                    className="p-3 bg-amber-50 border border-amber-100 rounded-xl text-center"
-                  >
-                    <p className="font-serif italic text-amber-900">{word.word}</p>
-                    <p className="text-[10px] uppercase tracking-tighter text-amber-600 font-mono">{word.difficulty}</p>
-                  </div>
-                ))}
+                {VOCAB_DATA.filter(w => progress[w.id] && progress[w.id].status !== 'mastered').map(word => {
+                  const data = progress[word.id];
+                  const isDueNow = isDue(word.id, progress);
+                  return (
+                    <div 
+                      key={word.id}
+                      className={`p-3 border rounded-xl text-center ${isDueNow ? 'bg-amber-50 border-amber-200' : 'bg-emerald-50 border-emerald-100'}`}
+                    >
+                      <p className={`font-serif italic ${isDueNow ? 'text-amber-900' : 'text-emerald-900'}`}>{word.word}</p>
+                      <p className="text-[9px] uppercase tracking-tighter text-muted-foreground font-mono mt-1">
+                        Next: {new Date(data.nextReview).toLocaleDateString()}
+                      </p>
+                      {isDueNow && (
+                        <span className="text-[8px] font-bold text-amber-600 uppercase tracking-widest">Due Now</span>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <div className="text-center py-12 text-muted-foreground">
@@ -805,6 +917,23 @@ export default function App() {
           </div>
           
           <div className="mt-8 flex flex-wrap justify-center gap-4">
+            <button 
+              onClick={() => setCurrentDeck('review')}
+              disabled={overallStats.dueCount === 0}
+              className={`px-8 py-4 rounded-2xl flex items-center gap-3 transition-all shadow-xl group ${
+                overallStats.dueCount > 0 
+                ? 'bg-amber-500 text-white shadow-amber-200 hover:bg-amber-600' 
+                : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+              }`}
+            >
+              <Zap size={24} />
+              <div className="text-left">
+                <p className="font-bold text-lg">Review Due Words</p>
+                <p className="text-[10px] uppercase tracking-widest opacity-80">{overallStats.dueCount} Words Ready for Review</p>
+              </div>
+              {overallStats.dueCount > 0 && <ArrowRight size={20} className="ml-2 group-hover:translate-x-1 transition-transform" />}
+            </button>
+
             <button 
               onClick={() => setCurrentDeck('daily')}
               className="px-8 py-4 bg-emerald-600 text-white rounded-2xl flex items-center gap-3 hover:bg-emerald-700 transition-all shadow-xl shadow-emerald-200 group"
@@ -1196,56 +1325,76 @@ export default function App() {
         </div>
 
         {/* Controls */}
-        {viewMode === 'study' && (
-          <div className="mt-8 sm:12 flex flex-col sm:flex-row items-center gap-6 sm:gap-8 w-full max-w-xl">
-            <div className="flex items-center justify-between w-full sm:w-auto sm:gap-8">
-              <button 
-                onClick={handlePrev}
-                disabled={currentIndex === 0}
-                className="p-4 rounded-full bg-white card-shadow disabled:opacity-30 active:scale-95 transition-all"
-                aria-label="Previous word"
+        {(viewMode === 'study' || viewMode === 'srs_review') && (
+          <div className="mt-8 sm:mt-12 flex flex-col items-center gap-6 w-full max-w-2xl px-4">
+            {isFlipped ? (
+              <motion.div 
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="grid grid-cols-2 sm:grid-cols-4 gap-3 w-full"
               >
-                <ChevronLeft size={24} />
-              </button>
-
-              <div className="flex gap-2 sm:gap-3">
                 <button 
-                  onClick={() => handleMasteryUpdate('learning')}
-                  className={`px-4 sm:px-6 py-3 rounded-2xl font-medium text-xs sm:text-sm transition-all active:scale-95 ${
-                    progress[currentWord?.id] === 'learning' 
-                    ? 'bg-amber-100 text-amber-700 border-2 border-amber-200' 
-                    : 'bg-white card-shadow'
-                  }`}
+                  onClick={() => handleSRSUpdate(1)}
+                  className="flex flex-col items-center gap-1 p-3 bg-rose-50 border border-rose-100 text-rose-700 rounded-2xl hover:bg-rose-100 transition-all active:scale-95"
                 >
-                  Learning
+                  <span className="text-xs font-bold">Again</span>
+                  <span className="text-[10px] opacity-70 font-mono">&lt; 1m</span>
                 </button>
                 <button 
-                  onClick={() => handleMasteryUpdate('mastered')}
-                  className={`px-4 sm:px-6 py-3 rounded-2xl font-medium text-xs sm:text-sm flex items-center gap-2 transition-all active:scale-95 ${
-                    progress[currentWord?.id] === 'mastered' 
-                    ? 'bg-emerald-100 text-emerald-700 border-2 border-emerald-200' 
-                    : 'bg-white card-shadow'
-                  }`}
+                  onClick={() => handleSRSUpdate(3)}
+                  className="flex flex-col items-center gap-1 p-3 bg-amber-50 border border-amber-100 text-amber-700 rounded-2xl hover:bg-amber-100 transition-all active:scale-95"
                 >
-                  <CheckCircle2 size={18} className="hidden sm:block" />
-                  Mastered
+                  <span className="text-xs font-bold">Hard</span>
+                  <span className="text-[10px] opacity-70 font-mono">2d</span>
+                </button>
+                <button 
+                  onClick={() => handleSRSUpdate(4)}
+                  className="flex flex-col items-center gap-1 p-3 bg-emerald-50 border border-emerald-100 text-emerald-700 rounded-2xl hover:bg-emerald-100 transition-all active:scale-95"
+                >
+                  <span className="text-xs font-bold">Good</span>
+                  <span className="text-[10px] opacity-70 font-mono">4d</span>
+                </button>
+                <button 
+                  onClick={() => handleSRSUpdate(5)}
+                  className="flex flex-col items-center gap-1 p-3 bg-blue-50 border border-blue-100 text-blue-700 rounded-2xl hover:bg-blue-100 transition-all active:scale-95"
+                >
+                  <span className="text-xs font-bold">Easy</span>
+                  <span className="text-[10px] opacity-70 font-mono">7d</span>
+                </button>
+              </motion.div>
+            ) : (
+              <div className="flex items-center justify-center gap-8 w-full">
+                <button 
+                  onClick={handlePrev}
+                  disabled={currentIndex === 0}
+                  className="p-4 rounded-full bg-white card-shadow disabled:opacity-30 active:scale-95 transition-all"
+                  aria-label="Previous word"
+                >
+                  <ChevronLeft size={24} />
+                </button>
+
+                <button 
+                  onClick={() => setIsFlipped(true)}
+                  className="px-10 py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-xl shadow-emerald-100 active:scale-95"
+                >
+                  Show Answer
+                </button>
+
+                <button 
+                  onClick={handleNext}
+                  className="p-4 rounded-full bg-white card-shadow active:scale-95 transition-all"
+                  aria-label="Next word"
+                >
+                  <ChevronRight size={24} />
                 </button>
               </div>
-
-              <button 
-                onClick={handleNext}
-                className="p-4 rounded-full bg-white card-shadow active:scale-95 transition-all"
-                aria-label="Next word"
-              >
-                <ChevronRight size={24} />
-              </button>
-            </div>
+            )}
           </div>
         )}
       </main>
 
       {/* Footer Stats */}
-      <footer className="p-4 sm:p-6 bg-white border-t border-black/5 flex items-center justify-around sm:justify-center gap-4 sm:gap-12">
+      <footer className="p-4 sm:p-6 bg-white border-t border-black/5 flex items-center justify-around sm:justify-center gap-4 sm:gap-12 pb-[calc(1rem+env(safe-area-inset-bottom))]">
         <div className="flex items-center gap-2 sm:gap-3">
           <BookOpen size={18} className="text-muted-foreground" />
           <div>

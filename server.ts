@@ -88,8 +88,8 @@ async function startServer() {
       
       const stats = rows.map(row => {
         const progress = JSON.parse(row.progress_json);
-        const mastered = Object.values(progress).filter(s => s === 'mastered').length;
-        const learning = Object.values(progress).filter(s => s === 'learning').length;
+        const mastered = Object.values(progress).filter((s: any) => (typeof s === 'string' ? s === 'mastered' : s.status === 'mastered')).length;
+        const learning = Object.values(progress).filter((s: any) => (typeof s === 'string' ? s === 'learning' : s.status === 'learning')).length;
         return {
           email: row.email,
           name: row.name || 'N/A',

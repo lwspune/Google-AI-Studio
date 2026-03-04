@@ -1,0 +1,21 @@
+{
+  "name": "NDA Vocab Master",
+  "short_name": "VocabMaster",
+  "description": "Master high-frequency vocabulary for the NDA exam",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F8F9FA",
+  "theme_color": "#059669",
+  "icons": [
+    {
+      "src": "pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
